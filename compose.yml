@@ -1,0 +1,14 @@
+services:
+  sen66_bridge:
+    build: ./bridge
+    container_name: sen66_bridge
+    restart: unless-stopped
+    devices:
+      # PLACEHOLDER: replace with the real path from `ls -l /dev/serial/by-id/` inside the VM.
+      # Never use /dev/ttyACM0 here.
+      - "/dev/serial/by-id/usb-Adafruit_<REPLACE_ME>-if00:/dev/ttySEN66"
+    environment:
+      # PLACEHOLDER: hostname or IP of the MQTT broker (no auth).
+      MQTT_HOST: "192.168.8.217"
+      TZ: Europe/Berlin
+      LOG_LEVEL: info

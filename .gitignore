@@ -1,0 +1,7 @@
+# Build output
+build/
+firmware/build/
+bridge/target/
+
+# macOS
+.DS_Store

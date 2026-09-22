@@ -1,0 +1,12 @@
+profiles:
+  feather:
+    notes: Adafruit Feather RP2040 Adalogger + Sensirion SEN66
+    fqbn: rp2040:rp2040:adafruit_feather_adalogger
+    platforms:
+      - platform: rp2040:rp2040 (6.1.1)
+        platform_index_url: https://github.com/earlephilhower/arduino-pico/releases/download/global/package_rp2040_index.json
+    libraries:
+      - Sensirion I2C SEN66 (1.3.1)
+      - Sensirion Core (0.7.3)
+
+default_profile: feather
