@@ -1,24 +1,22 @@
-# ziwoas-airquality: SEN66 → MQTT
+# ziwoas-airquality: SEN66 → ZiWoAS
 
 ## Überblick
 
 ```
-SEN66 ──I²C──▶ RP2040 ──USB-CDC, JSON-Zeilen──▶ Bridge (Docker) ──MQTT──▶ Broker ──▶ ZiWoAS
+SEN66 ──I²C──▶ RP2040 ──USB-CDC, JSON-Zeilen──▶ ZiWoAS (Docker auf dem Homeserver)
 ```
 
-Ein Sensirion SEN66 (PM, Temperatur, Feuchte, VOC, NOx, CO₂) hängt per I²C an einem Adafruit Feather RP2040
-Adalogger. Die Firmware misst jede Sekunde, bildet über 60 s den Median je Größe und schreibt eine JSON-Zeile über USB.
-Die Bridge (Rust, Docker) liest die Zeilen, validiert sie, setzt `taken_at` und veröffentlicht sie per MQTT.
-Die Logik liegt in der Firmware, die Bridge bleibt dumm. Verbindlich ist [SPEC.md](SPEC.md).
+- Ein Sensirion SEN66 (PM, Temperatur, Feuchte, VOC, NOx, CO₂) hängt per I²C an einem Adafruit Feather RP2040 Adalogger.
+- Die Firmware misst jede Sekunde, bildet über 60 s den Median je Größe und schreibt eine JSON-Zeile über USB.
+- Das Board steckt am USB des Homeservers. ZiWoAS liest den seriellen Port selbst, setzt `taken_at` und speichert die Messung.
+- Die Logik liegt in der Firmware. Verbindlich ist [SPEC.md](SPEC.md).
 
 ## Repo-Struktur
 
 ```
 firmware/           Arduino-Sketch (firmware.ino), sketch.yaml, build.sh, src/core/ (hardwarefreier Kern)
 firmware/test/      doctest-Tests des Kerns (CMake)
-bridge/             Rust-Crate, Dockerfile
-compose.yml         Deployment der Bridge
-.github/workflows/  CI: Kern-Tests, cargo test/clippy/fmt, docker build, arduino-cli compile
+.github/workflows/  CI: Kern-Tests, arduino-cli compile
 ```
 
 ## Verdrahtung
@@ -87,7 +85,7 @@ Pin 6  VDD  (frei lassen, intern = Pin 1)
 Schwache oder fehlende Pull-ups verfälschen keine Messwerte. Jedes Datenwort des SEN66 ist CRC-gesichert, ein
 gestörter Transfer endet als I²C-Fehler, nicht als falscher Wert. Die Firmware meldet ihn als `error`-Zeile
 (etwa `getDataReady(): …`) und liest mit Backoff neu. Schlimmstenfalls fehlen einzelne Sekunden im Median oder ein
-ganzes Fenster. Häufen sich solche Fehler im Bridge-Log, zuerst Verkabelung und Pull-ups prüfen.
+ganzes Fenster. Häufen sich solche Fehler im ZiWoAS-Log, zuerst Verkabelung und Pull-ups prüfen.
 
 ### Elektrische Eckdaten SEN66
 
@@ -155,7 +153,7 @@ USB-CDC, eine kompakte JSON-Zeile pro Nachricht, `\n`-terminiert. Details stehen
 | `type` | Wann | Inhalt |
 |---|---|---|
 | `hello` | beim Start, alle 10 min und beim Öffnen des Ports | `device_id`, `product`, `sensor_fw`, `firmware` |
-| `measurement` | alle 60 s (Median des Fensters) | alle State-Felder außer `taken_at` |
+| `measurement` | alle 60 s (Median des Fensters) | `device_id` und alle Messfelder |
 | `error` | I²C-Fehler, Fehlerbits in `device_status`, Sensor fehlt | `device_id` (oder `null`), `message` |
 
 ```
@@ -165,7 +163,7 @@ USB-CDC, eine kompakte JSON-Zeile pro Nachricht, `\n`-terminiert. Details stehen
 
 ### Ausgabe mitlesen
 
-Den Port kann immer nur ein Prozess offen haben. Vorher also die Bridge stoppen.
+Den Port sollte immer nur ein Prozess lesen. Läuft ZiWoAS mit dem Board, vorher ZiWoAS stoppen.
 Die Baudrate spielt bei USB-CDC keine Rolle.
 
 ```sh
@@ -183,158 +181,52 @@ stty -F /dev/ttyACM0 raw -echo && cat /dev/ttyACM0
 Unter macOS `cu.*` nehmen, nicht `tty.*`, denn `tty.*` blockiert beim Öffnen auf DCD.
 Unter Linux muss der Benutzer in der Gruppe `dialout` (Debian/Ubuntu) bzw. `uucp` (Arch) sein.
 
-## Bridge
+## Anbindung an ZiWoAS
 
-### Umgebungsvariablen
+Kurzfassung, Details in [SPEC.md](SPEC.md) und im ZiWoAS-Repo (ADR-0009).
 
-| Variable | Default | Bedeutung |
-|---|---|---|
-| `SERIAL_PORT` | `/dev/ttySEN66` | serieller Port der Firmware |
-| `MQTT_HOST` | – (Pflicht) | Broker-Hostname oder -IP |
-| `MQTT_PORT` | `1883` | Broker-Port |
-| `MQTT_USERNAME` | – (optional) | nur falls der Broker Auth verlangt |
-| `MQTT_PASSWORD` | – (optional) | nur falls der Broker Auth verlangt |
-| `TOPIC_PREFIX` | `ziwoas/sen66` | Präfix der Topics |
-| `LOG_LEVEL` | `info` | `error`, `warn`, `info`, `debug` (Messwerte erst auf `debug`), `trace` |
+- Board am USB des Homeservers einstecken, stabilen Pfad ermitteln:
 
-### Lokale Entwicklung auf dem Mac
+  ```sh
+  ls -l /dev/serial/by-id/
+  # usb-Adafruit_Feather_RP2040_Adalogger_E4629C...-if00 -> ../../ttyACM0
+  ```
 
-Docker Desktop für macOS lässt Container in einer Linux-VM laufen und kann keine USB-Geräte hineinreichen.
-Ein `devices:`-Eintrag mit `/dev/cu.usbmodem…` funktioniert dort nicht. Auf dem Mac läuft die Bridge deshalb nativ,
-Docker braucht man hier nur für den Broker.
+- In `ziwoas.yml` einen Sensor vom Typ `sen66` eintragen. `id` = Seriennummer aus der `hello`-Zeile,
+  `port` = der `by-id`-Pfad unter `/host-dev`, **niemals `/dev/ttyACM0`** (die Nummer hängt von der Reihenfolge der Geräte ab).
 
-```sh
-# Terminal 1: Broker ohne Auth
-docker run --rm -p 1883:1883 eclipse-mosquitto:2 mosquitto -c /mosquitto-no-auth.conf
+  ```yaml
+  - id: "19B8E27966467D7A"
+    name: "Raumluft"
+    type: sen66
+    room: "Wohnzimmer"
+    port: /host-dev/serial/by-id/usb-Adafruit_Feather_RP2040_Adalogger_…-if00
+  ```
 
-# Terminal 2: Bridge
-cd bridge
-SERIAL_PORT=/dev/cu.usbmodemXXXX MQTT_HOST=localhost LOG_LEVEL=debug cargo run
+- Compose-Dienst von ZiWoAS (am Server getestet):
 
-# Terminal 3: mitlesen
-mosquitto_sub -h localhost -v -t 'ziwoas/sen66/#'
-```
+  ```yaml
+  volumes:
+    - /dev:/host-dev:ro
+  device_cgroup_rules:
+    - "c 166:* rmw"
+  group_add:
+    - "20"   # dialout, Gruppe von /dev/ttyACM*
+  ```
 
-### Tests
+  Ein `devices:`-Eintrag reicht nicht, er bindet nur den Knoten, der beim Containerstart existiert. Nur
+  `/dev/serial/by-id` einzuhängen reicht auch nicht: Die Links sind relativ (`../../ttyACM0`).
 
-```sh
-cd bridge
-cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test
-```
-
-Die Tests brauchen keine Hardware. Port und MQTT werden per Trait durch Fakes ersetzt.
-
-## Deployment auf dem Homeserver
-
-Docker läuft in einer VM unter Proxmox. Der Feather wird per **Vendor:Product-ID** an die VM durchgereicht.
-So landet er nach dem Abziehen und Wiedereinstecken automatisch wieder in der VM, egal an welchem Port.
-
-### 1. USB-ID auf dem Proxmox-Host ermitteln
-
-```sh
-lsusb
-# Bus 001 Device 007: ID 239a:815d Adafruit Feather RP2040 Adalogger
-```
-
-| Zustand | VID:PID |
-|---|---|
-| Laufende Firmware (arduino-pico, USB-CDC) | `239a:815d` |
-| Bootloader / BOOTSEL (`RPI-RP2`-Laufwerk) | `2e8a:0003` |
-
-`239a:815d` ist die ID, die der arduino-pico-Core für dieses Board einträgt (`boards.txt`,
-`adafruit_feather_adalogger.pid.0`). Maßgeblich ist, was `lsusb` anzeigt.
-
-**Folge für das Flashen:** Durchgereicht wird nur `239a:815d`. Beim Upload springt das Board in den Bootloader und
-meldet sich als `2e8a:0003`. Dieses Gerät landet auf dem Proxmox-Host, nicht in der VM. Ein `arduino-cli upload`
-aus der VM heraus bricht deshalb ab. Am einfachsten flasht man am Mac. Wer in der VM flashen will, reicht
-`2e8a:0003` vorübergehend zusätzlich durch (`-usb1 host=2e8a:0003`).
-
-### 2. An die VM durchreichen
-
-GUI: *VM → Hardware → Add → USB Device → Use USB Vendor/Device ID →* `239a:815d` wählen.
-
-CLI auf dem Proxmox-Host:
-
-```sh
-qm set <vmid> -usb0 host=239a:815d
-```
-
-Ist USB-Hotplug für die VM aktiv (*Options → Hotplug*, Default enthält USB), wirkt das sofort. Sonst die VM neu
-starten (in der GUI ist die Änderung dann orange markiert).
-
-### 3. In der VM
-
-```sh
-ls -l /dev/serial/by-id/
-# usb-Adafruit_Feather_RP2040_Adalogger_E4629C...-if00 -> ../../ttyACM0
-```
-
-Diesen `by-id`-Pfad in `compose.yml` eintragen (Platzhalter unter `devices:` ersetzen) und `MQTT_HOST` setzen.
-**Niemals `/dev/ttyACM0` eintragen.** Die Nummer hängt von der Reihenfolge der Geräte ab.
-
-```sh
-docker compose up -d --build
-docker compose logs -f sen66_bridge
-```
-
-Hinweis: Docker löst den `devices:`-Pfad beim Containerstart auf. Fehlt der Feather zu diesem Zeitpunkt, startet der
-Container nicht. Den Feather also vor `docker compose up` einstecken.
-
-## MQTT-Vertrag
-
-Verbindlich für ZiWoAS (aus [SPEC.md](SPEC.md)):
-
-| Topic | Payload | retained | QoS |
-|---|---|---|---|
-| `ziwoas/sen66/<device_id>/state` | JSON-Messung | nein | 1 |
-| `ziwoas/sen66/<device_id>/availability` | `online` / `offline` | ja | 1 |
-
-`<device_id>` = SEN66-Seriennummer (`getSerialNumber()`), exakt so, wie die Firmware sie meldet.
-
-State-Payload (Feldnamen nicht umbenennen, kein Feld weglassen, unbekannt = `null`):
-
-```json
-{"device_id":"0123456789ABCDEF","taken_at":"2026-09-22T14:03:00Z","pm1_0":2.1,"pm2_5":3.4,"pm4_0":3.9,"pm10":4.2,"temperature":21.7,"humidity":48.2,"voc_index":102,"nox_index":1,"co2":612,"device_status":0}
-```
-
-| Feld | Einheit / Typ |
-|---|---|
-| pm1_0, pm2_5, pm4_0, pm10 | µg/m³, Float, eine Nachkommastelle, oder null |
-| temperature | °C, Float, eine Nachkommastelle, oder null |
-| humidity | % r. F., Float, eine Nachkommastelle, oder null |
-| voc_index, nox_index | Integer 1–500 oder null |
-| co2 | ppm, Integer, oder null |
-| device_status | Rohwert von `readDeviceStatus()` (uint32) als Integer |
-| taken_at | UTC, RFC 3339, auf Sekunden gerundet, Suffix `Z`, von der Bridge beim Empfang gesetzt |
-
-Schlüsselreihenfolge: `device_id`, `taken_at`, dann die Messfelder in Tabellenreihenfolge.
-
-### Availability
-
-- `online` (retained) nach dem ersten `hello` bzw. der ersten Messung, auch nach Wiederkehr des Ports.
-- `offline` (retained) wenn:
-  - der Port wegfällt (USB gezogen, Lese- oder Öffnungsfehler),
-  - die Bridge per SIGTERM/SIGINT beendet wird,
-  - die Bridge abstürzt oder die Broker-Verbindung abreißt (Last Will, retained, QoS 1),
-  - sich die Geräte-ID ändert (für das alte Gerät).
-- Die Bridge verbindet sich erst mit MQTT, wenn die Geräte-ID bekannt ist. Client-ID: `sen66_bridge_<device_id>`.
-- Messungen, die ohne Broker-Verbindung anfallen, gehen verloren. Es gibt keinen Puffer.
+- Abziehen und Wiedereinstecken überbrückt ZiWoAS selbst (Neuöffnen mit Backoff 1 s … 60 s).
 
 ## Abnahme / Checks
 
-```sh
-mosquitto_sub -h <broker> -v -t 'ziwoas/sen66/#'
-```
-
-1. **Einstecken:** Innerhalb von 2 Minuten erscheinen `…/availability online` und eine gültige Nachricht auf
-   `…/state`. Die erste Messung kommt nach etwa 60 s, bis zum Ende des ersten Fensters.
-2. **Abziehen:** `…/availability` steht binnen weniger Sekunden auf `offline`.
-   **Wiedereinstecken:** wieder `online` und neue Messungen, ohne Neustart der Bridge
-   (`docker compose logs sen66_bridge` zeigt das Wiederöffnen mit Backoff).
-3. **Neustart der Bridge** (`docker compose restart sen66_bridge`): kurz `offline`, dann `online`. Die Messungen
-   laufen ohne erneute Lernphase weiter, weil die Firmware den Sensor nicht stoppt und das Öffnen des Ports das
-   Board nicht zurücksetzt. Die VOC- und NOx-Indizes springen nicht zurück.
-4. **CI** ist grün (Kern-Tests, Bridge-Tests, Docker-Build, Firmware-Compile).
+1. **Einstecken:** Innerhalb von 2 Minuten steht in ZiWoAS eine Messung des SEN66.
+   Die erste Messung kommt nach etwa 60 s, bis zum Ende des ersten Fensters.
+2. **Abziehen und Wiedereinstecken:** ZiWoAS liest danach wieder, ohne Neustart (das Log zeigt das Neuöffnen mit Backoff).
+3. **Neustart von ZiWoAS:** Die Messungen laufen ohne erneute Lernphase weiter, weil die Firmware den Sensor nicht
+   stoppt und das Öffnen des Ports das Board nicht zurücksetzt. Die VOC- und NOx-Indizes springen nicht zurück.
+4. **CI** ist grün (Kern-Tests, Firmware-Compile).
 
 ## Offene Punkte
 
@@ -344,5 +236,5 @@ mosquitto_sub -h <broker> -v -t 'ziwoas/sen66/#'
 - **CO₂-ASC und Höhe/Luftdruck:** Sie bleiben auf Werkseinstellung (ASC an, keine Höhenkompensation).
   ASC setzt voraus, dass der Raum regelmäßig gut gelüftet wird. Bei deutlich von Meereshöhe abweichendem Standort
   später Höhe oder Luftdruck setzen.
-- **microSD-Puffer:** Der Adalogger hat einen microSD-Slot. Ein Puffer für Messungen während Bridge- oder
-  Broker-Ausfällen wäre möglich, ist aber bewusst nicht umgesetzt.
+- **microSD-Puffer:** Der Adalogger hat einen microSD-Slot. Ein Puffer für Messungen während Ausfällen von
+  ZiWoAS wäre möglich, ist aber bewusst nicht umgesetzt.
